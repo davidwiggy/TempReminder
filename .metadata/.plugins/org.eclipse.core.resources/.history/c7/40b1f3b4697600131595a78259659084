@@ -1,0 +1,564 @@
+package com.tempreminder;
+
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.util.ArrayList;
+import java.util.Calendar;
+
+import org.apache.http.HttpResponse;
+import org.apache.http.client.ClientProtocolException;
+import org.apache.http.client.HttpClient;
+import org.apache.http.client.methods.HttpGet;
+import org.apache.http.impl.client.DefaultHttpClient;
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import android.app.Activity;
+import android.app.AlarmManager;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.content.ContentValues;
+import android.content.Context;
+import android.content.Intent;
+import android.database.Cursor;
+import android.net.ConnectivityManager;
+import android.os.AsyncTask;
+import android.os.Bundle;
+import android.util.Log;
+import android.view.View;
+import android.widget.Button;
+import android.widget.EditText;
+import android.widget.TextView;
+import android.widget.TimePicker;
+import android.widget.Toast;
+import dbmanager.AlertTempDatabaseProvider;
+//*********************************************************************************************
+//** Class:      MainActivity                                                                **
+//** Programmer: Timothy David Wiggins                                                       **
+//** PURPOSE:    This class/activity presents the view to the user and allows the user to    **
+//** PURPOSE:    enter the zip code, alert time, and alert temperature. If the user than sets**
+//** PURPOSE:    the alert the program immediately updates the expected low temp, than it    **
+//** PURPOSE:    sets an Alarm Manager that fires each night at midnight to start a service, **
+//** PURPOSE:    to get the expected low for that night. If the expected low is lower than   **
+//** PURPOSE:    user entered temp the service sets another Alarm Manager that will fire an  **
+//** PURPOSE:    alert, at the user entered time, with lock screen and a dialog box letting  **
+//** PURPOSE:    user know that the condition has been meet and a low temperature is         **
+//** PURPOSE:    expected. 																	 **
+//*********************************************************************************************
+public class MainActivity extends Activity 
+{
+	private TimePicker timepicker;
+	private Button btnAlarm, btnStop, btnSetAlertTime;
+	private int hour, minute, zipCode, alertTemp;
+	private EditText enteredZip, enteredAlertTemp;
+	private TextView tvExpectedTemp;
+	private String minTemp;
+	private boolean validZip, validTemp;
+    
+    @Override
+    protected void onCreate(Bundle savedInstanceState) 
+    {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main);
+        
+        NotificationManager notificationManager = (NotificationManager)getSystemService(Context.NOTIFICATION_SERVICE);
+        notificationManager.cancel(1);
+        createFirstRecord();
+        
+        alertTemp = -1000;
+        validZip = false;
+        validTemp = false;
+        timepicker = (TimePicker)findViewById(R.id.timePicker1);
+        enteredZip = (EditText)findViewById(R.id.etZipCode);
+        enteredAlertTemp = (EditText)findViewById(R.id.etAlertTemp);
+        tvExpectedTemp = (TextView)findViewById(R.id.tvExpectedTemp);
+        
+        btnAlarm = (Button)findViewById(R.id.btnSetAlarm);
+        btnStop  = (Button)findViewById(R.id.btnStopAlarm);
+        btnSetAlertTime = (Button)findViewById(R.id.btnSetTime);
+        
+        btnAlarm.setOnClickListener(myButtonListener);
+        btnStop.setOnClickListener(myButtonListener);
+        btnSetAlertTime.setOnClickListener(myButtonListener);
+        
+    }//End of OnCreate
+    
+	//*******************************************************
+	//** The method is an onClick Listener for the buttons **
+	//** It contains a switch statement to perform an      **
+	//** action when one of the buttons is clicked.        **
+	//*******************************************************
+    private android.view.View.OnClickListener myButtonListener = new View.OnClickListener() 
+    {
+	
+		@Override
+		public void onClick(View v) 
+		{
+			switch (v.getId())
+				{
+					case R.id.btnSetAlarm:    loadDatabase();
+											  break;
+											  
+					case R.id.btnStopAlarm:   Toast.makeText(MainActivity.this, "Alert Stopped!", Toast.LENGTH_LONG).show();
+											  stopMyService();
+											  break;	
+								
+					case R.id.btnSetTime:     setAlertTime(); 
+											  break;							
+				}
+		}
+	};//End of onClickListener
+	
+	//*******************************************************
+	//** This method starts the alarm manager that fires   **
+	//** each night to start the service, that updates the **
+	//** expected low and sets the next alarm manager if   **
+	//** the condition is meet. It also updates a flag     **
+	//** value in the database letting the broadcast       **
+	//** receiver know that the service is okay to start.  **
+	//** This is used in case the phone is ever shutdown.  **
+	//*******************************************************
+    private void startMyService()
+    {
+    	int setHourTime;
+
+    	if (validZip == true && validTemp == true)
+    	{
+    		stopMyService();
+    		String whereClause = dbmanager.Constants._id + " = " + "'1'";
+    		
+    		ContentValues value = new ContentValues();
+    		value.put(dbmanager.Constants.COLUMN_ALERT_SET, 1);
+    		
+    		getContentResolver().update(AlertTempDatabaseProvider.TABLE_URI, 
+    				value, whereClause, null);
+    		if(hour <= 2)
+    			setHourTime = 0;
+    		else
+    			setHourTime = hour - 2;
+    			
+	    	Calendar cal = Calendar.getInstance();
+	    	cal.set(Calendar.HOUR_OF_DAY, setHourTime);
+	    	cal.set(Calendar.MINUTE, minute);
+	    	cal.set(Calendar.SECOND, 0);
+	    	Intent intent = new Intent(this, MyService.class);
+	    	PendingIntent pintent = PendingIntent.getService(this, 0, intent, 0);
+	    	
+	    	AlarmManager alarm = (AlarmManager)getSystemService(Context.ALARM_SERVICE);
+	    	alarm.setRepeating(AlarmManager.RTC_WAKEUP, cal.getTimeInMillis(), AlarmManager.INTERVAL_DAY, pintent);
+	    	Toast.makeText(this, "Alert Started", Toast.LENGTH_LONG).show();
+    	}
+    	
+    }//End of StartMyService
+	
+	//*******************************************************
+	//** This method stops the alarm manager that starts   **
+    //** the service everynight at midnight.               **
+	//*******************************************************
+	private void stopMyService()
+	{
+		
+		String whereClause = dbmanager.Constants._id + " = " + "'1'";
+		
+		ContentValues value = new ContentValues();
+		value.put(dbmanager.Constants.COLUMN_ALERT_SET, 0);
+		
+		getContentResolver().update(AlertTempDatabaseProvider.TABLE_URI, 
+				value, whereClause, null);
+		
+		Intent intentStop = new Intent(this, MyService.class);
+    	PendingIntent pintentStop = PendingIntent.getService(this, 0, intentStop, 0);
+    	
+    	AlarmManager alarmStop = (AlarmManager)getSystemService(Context.ALARM_SERVICE);
+		alarmStop.cancel(pintentStop);
+	}//End of stopMyService
+	
+	//*******************************************************
+	//** This method gets the time from the time picker    **
+	//** and then updates the information in the database. **
+	//** It also starts a new alert with the updated time  **
+	//** if the alert is set.                              **
+	//*******************************************************
+	private void setAlertTime()
+	{
+		String whereClause = dbmanager.Constants._id + " = " + "'1'";
+	
+		Cursor alertTempCursor = getContentResolver().query(AlertTempDatabaseProvider.TABLE_URI, 
+				null, whereClause, null, null);
+		
+		int alertSet = 0;
+		String tempAlertSet = null;
+		
+		if(alertTempCursor.moveToFirst())
+		{
+			do
+			{
+				int alertSetIndex = alertTempCursor.getColumnIndex("AlertSet");
+				tempAlertSet = alertTempCursor.getString(alertSetIndex);
+			}while(alertTempCursor.moveToNext());
+		}			
+		
+		try 
+		{ 
+		  alertSet = Integer.valueOf(tempAlertSet);
+		}
+		catch (NumberFormatException e) 
+		{
+		  Log.i("Problem", "Query for AlertTemp");
+		}
+		
+		hour = timepicker.getCurrentHour();
+		minute = timepicker.getCurrentMinute();
+	
+		
+		ContentValues value = new ContentValues();
+		value.put(dbmanager.Constants.COLUMN_HOUR, hour);
+		value.put(dbmanager.Constants.COLUMN_MINUTE, minute);
+		
+		getContentResolver().update(AlertTempDatabaseProvider.TABLE_URI, 
+				value, whereClause, null);
+		Toast.makeText(this, "Alert Time Set!", Toast.LENGTH_LONG).show();
+		
+		if(alertSet == 1)
+			startMyService();
+	}
+	
+	//*******************************************************
+	//** This method gets the time from the time picker    **
+	//** and then updates the information in the database. **
+	//*******************************************************
+	private void createFirstRecord()
+	{	
+		String[] columns = new String[] { dbmanager.Constants._id };
+		String whereClause = dbmanager.Constants._id + " = " + "'1'";
+		
+		Cursor cursor = getContentResolver().query(AlertTempDatabaseProvider.TABLE_URI,
+				columns, whereClause, null, null);
+		
+		if(cursor.getCount() == 0)
+		{
+			ContentValues value = new ContentValues();
+			value.put(dbmanager.Constants.COLUMN_ALERT_SET, 0);
+			value.put(dbmanager.Constants.COLUMN_HOUR, -1);
+			value.put(dbmanager.Constants.COLUMN_MINUTE, -1);
+			value.put(dbmanager.Constants.COLUMN_ALERT_TEMP, -1000);
+			value.put(dbmanager.Constants.COLUMN_PROJECTED_LOW, 0);
+			value.put(dbmanager.Constants.COLUMN_ALERT_FIRING, 0);
+			getContentResolver().insert(AlertTempDatabaseProvider.TABLE_URI, value);
+		}     
+	}
+	
+	//*******************************************************
+	//** This method gets the time from the time picker    **
+	//** and then updates the information in the database. **
+	//** If the original value that is build into the db is**
+	//** still there it lets the user know that he/she must**
+	//** set an alert temp. This method also sets a flag   **
+	//** so the service knows if it is okay to start.      **
+	//*******************************************************
+	private void checkAlertTemp()
+	{
+	
+		String whereClause = dbmanager.Constants._id + " = " + "'1'";
+		String[] col = new String[] { dbmanager.Constants.COLUMN_ALERT_TEMP };
+		
+		//Checking to make sure the Alert Temperature has been set!!!
+		if(enteredAlertTemp.getText().length() == 0)
+		{
+			Cursor alertTempCursor = getContentResolver().query(AlertTempDatabaseProvider.TABLE_URI, 
+					col, whereClause, null, null);
+			
+			ArrayList<String> alertTempList = new ArrayList<String>();
+			if(alertTempCursor.moveToFirst())
+			{
+				do
+				{
+					int ct = 0;
+					alertTempList.add(alertTempCursor.getString(ct));
+					ct++;
+				}while(alertTempCursor.moveToNext());
+			}
+			
+			String[] tempArrAlert;
+			tempArrAlert = (String[]) alertTempList.toArray(new String[alertTempList.size()]);
+			try { 
+			  alertTemp = Integer.valueOf(tempArrAlert[0]);
+			}
+			catch (NumberFormatException e) {
+			  Log.i("Problem", "Query for AlertTemp");
+			}
+			
+			if(alertTemp == -1000)
+			{
+				Toast.makeText(this, "You must enter an alert Temperature!", Toast.LENGTH_LONG).show();
+				validTemp = false;
+			}
+			else
+				validTemp = true;
+		}
+		else
+		{
+			try { 
+				alertTemp = Integer.valueOf(enteredAlertTemp.getText().toString());
+			}
+			catch (NumberFormatException e) {
+				 e.printStackTrace();
+			}
+			ContentValues value = new ContentValues();
+			value.put(dbmanager.Constants.COLUMN_ALERT_TEMP, alertTemp);
+			
+			getContentResolver().update(AlertTempDatabaseProvider.TABLE_URI, 
+					value, whereClause, null);
+			
+			validTemp = true;
+		}
+	}
+	
+	//*******************************************************
+	//** This method checks that the alert time has been   **
+	//** either from the database or from enter values.    **
+	//** Then it moves on to the zip code. It checks if    **
+	//** the user has entered a zip or it gets old data    **
+	//** from the db. If the values are all good it sets
+	//** the flag to true so that the service can start.   **
+	//** If both values are good it calls the GetData      **
+	//** class to get relevant information. This class also**
+	//** updates the db on a as needed basis.              **
+	//*******************************************************
+	private void loadDatabase()
+	{
+		boolean connection = false;
+		checkAlertTemp();
+		
+		String whereClause = dbmanager.Constants._id + " = " + "'1'";
+		String[] columns = new String[] { dbmanager.Constants.COLUMN_HOUR };
+		
+		//Checking to make sure the Alert time has been set!!!!!
+		Cursor cursor = getContentResolver().query(AlertTempDatabaseProvider.TABLE_URI,
+				columns, whereClause, null, null);
+
+		//Getting the value out of the cursor!!	
+		ArrayList<String> tempList = new ArrayList<String>();
+		if(cursor.moveToFirst())
+		{
+			do
+			{
+				int ct = 0;
+				tempList.add(cursor.getString(ct));
+				ct++;
+			}while(cursor.moveToNext());
+		}
+		
+		String[] tempArr;
+		tempArr = (String[]) tempList.toArray(new String[tempList.size()]);
+		int hourValue;
+		try { 
+		  hourValue = Integer.valueOf(tempArr[0]);
+		}
+		catch (NumberFormatException e) {
+		  hourValue = 0;
+		}
+		
+		
+		//Condition Checking hour...If AlertTime is set than it moves on to check the zip Code...If zip code is good it sets a flag
+		if(hourValue == -1)
+		{
+			Toast.makeText(this, "You must enter alert time!", Toast.LENGTH_LONG).show();
+			validZip = false;
+			return;
+		}
+		//Finished with Alert value moving on to the Zip Code
+		else
+		{
+			
+			String temp = null;
+			temp = String.valueOf(enteredZip.getText().toString());
+			if(temp.length() == 5)
+			{
+				zipCode = Integer.parseInt(temp);
+				try
+				{
+					connection = CheckNetwork();
+					if(connection == true)
+						new GetData().execute("http://api.worldweatheronline.com/free/v1/weather.ashx?q=" + zipCode + "&format=json&num_of_days=1&cc=cc&includelocation=no&show_comments=no&key=tvhecebgqy5szyz89qe4ps77");
+					else
+						Toast.makeText(this, "Internet connection not detected", Toast.LENGTH_LONG).show();
+					
+				}catch(Exception e){
+					e.printStackTrace();
+				}	
+			}
+			else if(temp.length() != 0 && temp.length() != 5)
+				Toast.makeText(this, "Zip code must be five digits!", Toast.LENGTH_LONG).show();
+			else if (temp.length() == 0)
+			{
+				columns = new String[] { dbmanager.Constants.COLUMN_ZIP };
+				
+				Cursor cursorZip = getContentResolver().query(AlertTempDatabaseProvider.TABLE_URI,
+						columns, whereClause, null, null);
+				
+				ArrayList<String> tempZip = new ArrayList<String>();
+				if(cursorZip.moveToFirst())
+				{
+					do
+					{
+						int ct = 0;
+						tempZip.add(cursorZip.getString(ct));
+						ct++;
+					}while(cursorZip.moveToNext());
+				}
+				
+				String[] tempArrZip;
+				tempArrZip = (String[]) tempZip.toArray(new String[tempZip.size()]);
+				try { 
+				  zipCode = Integer.valueOf(tempArrZip[0]);
+				  //Log.i("Zip", "  " + zipCode);
+				}
+				catch (NumberFormatException e) {
+				  Log.i("Problem", "Query for Zip");
+				}
+				try
+				{
+					connection = CheckNetwork();
+					if(connection == true)
+						new GetData().execute("http://api.worldweatheronline.com/free/v1/weather.ashx?q=" + zipCode + "&format=json&num_of_days=1&cc=cc&includelocation=no&show_comments=no&key=tvhecebgqy5szyz89qe4ps77");
+					else
+						Toast.makeText(this, "Internet connection not detected", Toast.LENGTH_LONG).show();
+					
+				}catch(Exception e){
+					e.printStackTrace();
+				}	
+			}//End of temp.length == 0;	
+		}//End of hour and zip Condition
+	}//End of loadDatabase
+	
+	//*******************************************************
+	//** This method checks the status of the network      **
+	//** connection and returns a boolean.                 **
+	//*******************************************************
+	private boolean CheckNetwork()
+	{
+	    ConnectivityManager conMgr = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+	    if (conMgr.getActiveNetworkInfo() != null
+	            && conMgr.getActiveNetworkInfo().isAvailable()
+	            && conMgr.getActiveNetworkInfo().isConnected()) 
+	        return true;
+	    else 
+	        return false;
+	}
+	
+	//*********************************************************************************************
+	//** Class:      SubClass=GetData                                                            **
+	//** Programmer: Timothy David Wiggins                                                       **
+	//** PURPOSE:    This class is a AsyncTask that runs on a separate thread from the main      **
+	//** PURPOSE:    class. This class access a web api and pulls data from the site and then    **
+	//** PURPOSE:    parses the JSON data to get the relevant information out of the file. Once  **
+	//** PURPOSE:    the information has been parsed it uses a post execute method to display if **
+	//** PURPOSE:    the zip code was found or not. If the zip was found it updates the db with  **
+	//** PURPOSE:    the new zip and then calls the startService method.                         **
+	//*********************************************************************************************
+	public class GetData extends AsyncTask<String, Void, String>
+    {
+
+    	@Override
+    	protected String doInBackground(String...params)
+    	{
+    			
+    		BufferedReader reader = null ;
+    		
+    		try{
+    			HttpClient client = new DefaultHttpClient();
+    			//Storing the address
+    			URI uri = new URI(params[0]);
+    			//Retrieve info
+    			HttpGet get = new HttpGet(uri);
+    			//Executing the request
+    			HttpResponse response = client.execute(get);
+    			//Entity - sent or received with an HTTP message
+    			InputStream stream = response.getEntity().getContent();
+    			reader = new BufferedReader(new InputStreamReader(stream));
+    			
+    			StringBuilder builder = new StringBuilder();
+    			String line = "";
+    			
+    			while((line = reader.readLine()) != null)
+    			{
+    				builder.append(line);
+    			}
+    			reader.close();
+    			
+    			String jsonData = builder.toString();
+    			
+    			
+    			JSONObject json = new JSONObject(jsonData);
+    			JSONObject data = json.getJSONObject("data");
+    			JSONArray weather = data.getJSONArray("weather");
+    			
+    			for(int  i = 0; i < weather.length(); i++)
+    			{
+    				JSONObject temperature = weather.getJSONObject(i);
+    				minTemp = temperature.getString("tempMinF");
+    			}
+
+    			return minTemp;
+    		
+    		
+    		}catch (URISyntaxException e){
+    			e.printStackTrace();
+    			
+    		}catch (ClientProtocolException e){
+    			e.printStackTrace();
+    			
+    		}catch (IOException e){
+    			e.printStackTrace();
+    			
+    		} catch (JSONException e) {
+				e.printStackTrace();
+			}
+    		
+    		finally {
+    			if (reader != null) {
+    				try {
+    					reader.close();
+    				}catch (Exception e){
+    					
+    				}
+    			}
+    		}
+    		//If null is returned means; Finally block is not executed
+    		return null;
+    	}
+    	
+    	@Override
+    	protected void onPostExecute(String result)
+    	{  		
+    		String whereClause = dbmanager.Constants._id + " = " + "'1'";
+    		super.onPostExecute(result);
+    		if(result == null)
+    		{
+        		Toast.makeText(MainActivity.this, "ZipCode Not Found", Toast.LENGTH_LONG).show();
+        		tvExpectedTemp.setText("");
+        		validZip = false;
+    		}
+    		else
+    		{
+    			tvExpectedTemp.setText(result + (char)0x00B0);
+    			
+    			ContentValues value = new ContentValues();
+				value.put(dbmanager.Constants.COLUMN_ZIP, zipCode);
+				value.put(dbmanager.Constants.COLUMN_PROJECTED_LOW, result);
+				value.put(dbmanager.Constants.COLUMN_NEW_LOW, result);
+				getContentResolver().update(AlertTempDatabaseProvider.TABLE_URI,
+						value, whereClause, null);
+				validZip = true;
+				startMyService();
+    		}	
+    	}
+    	
+    }//End of GetData	
+}//End of MainActivity Class
